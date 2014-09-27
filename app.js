@@ -97,7 +97,7 @@ var helpers = {
             function(login, cb) {
                 client.get('id_'+login,function(err,data){
                     data = JSON.parse(data);
-                    if(!err && helpers.calculatePasswordHash(password, data.salt) == data.password_hash){
+                    if(!err && data && helpers.calculatePasswordHash(password, data.salt) == data.password_hash){
                         cb(null,login);
                     }else if(!err){
                         cb('wrong_password', login);
@@ -109,24 +109,50 @@ var helpers = {
 
             }
         ], function(errmsg, login) {
-            client.get('id_'+login,function(err,data){
-                data = JSON.parse(data);
-                if(!errmsg){
+            console.log(errmsg);
+            if(!errmsg){
+                client.get('id_'+login,function(err,data){
+                    data = JSON.parse(data);
                     data.count_failed = 0;
                     data.last_login_date = data.current_login_date;
                     data.current_login_date = new Date();
-                }else if(errmsg != 'banned' && errmsg != 'locked'){
-                    data.count_failed += 1;
-                    if(data.count_failed >= globalConfig.userLockThreshold){
-                        client.delete('id_'+login);
-                        client.get('locked_users',function(err,locked_users){
-                            locked_users = JSON.parse(locked_users);
-                            locked_users.list.push(login);
-                            client.replace('locked_users',JSON.stringify(locked_users));
-                        });
+                    data.last_ip = data.current_ip;
+                    data.current_ip = ip;
+                    client.replace('id_'+login,JSON.stringify(data));
+                });
+                client.get('ip_'+ip,function(err,data){
+                    if(!data){
+                        data = {'count_failed':0}
+                        client.set('ip_'+ip,JSON.stringify(data));
+                    }else{
+                        data = JSON.parse(data);
+                        data.count_failed = 0;
+                        client.replace('ip_'+ip,JSON.stringify(data));
                     }
+                });
+            } else {
+                if(errmsg != 'locked'){
+                    client.get('id_'+login,function(err,data){
+                        if(data){
+                            data = JSON.parse(data);
+                            console.log(data);
+                            data.count_failed += 1;
+                            if(data.count_failed >= globalConfig.userLockThreshold){
+                                client.delete('id_'+login);
+                                client.get('locked_users',function(err,locked_users){
+                                    locked_users = JSON.parse(locked_users);
+                                    locked_users.list.push(login);
+                                    client.replace('locked_users',JSON.stringify(locked_users));
+                                });
+                            }
+                            client.replace('id_'+login,JSON.stringify(data));
+                        }
+                    });
+                }
+
+                if(errmsg != 'banned'){
                     client.get('ip_'+ip,function(err,data){
-                        if(!data)f{
+                        if(!data){
                             data = {'count_failed':1}
                             client.set('ip_'+ip,JSON.stringify(data));
                         }else{
@@ -143,15 +169,13 @@ var helpers = {
                                 client.replace('ip_'+ip,JSON.stringify(data));
                             }
                         }
-                    })
-                    client.replace('id_'+login,JSON.stringify(data));
+                    });
                 }
-            });
-            console.log(errmsg);
+            }
             callback(errmsg, login);
         });
     },
-
+    
     getCurrentUser: function(login, callback) {
         client.get('id_'+login,function(err,data){
             if(err){
@@ -226,7 +250,9 @@ app.get('/mypage', function(req, res) {
 
         client.get('id_'+req.session.login,function(err,data){
             data = JSON.parse(data);
-            var lastLogin = data.last_login_date;
+            console.log(data);
+            var lastLogin = {'created_at':data.last_login_date, 'ip':data.last_ip};
+            console.log(lastLogin);
             res.render('mypage', { 'last_login': lastLogin});
         })
     });
@@ -256,5 +282,9 @@ app.use(function (err, req, res, next) {
 var server = app.listen(process.env.PORT || 8080, function() {
     console.log('Listening on port %d', server.address().port);
 });
+
+
+
+
 
 
