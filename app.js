@@ -126,7 +126,7 @@ var helpers = {
                         });
                     }
                     client.get('ip_'+ip,function(err,data){
-                        if(!data){
+                        if(!data)f{
                             data = {'count_failed':1}
                             client.set('ip_'+ip,JSON.stringify(data));
                         }else{
@@ -163,13 +163,15 @@ var helpers = {
 
     getBannedIPs: function(callback) {
         client.get('banned_ips',function(err,data){
-            callback(data);
+            banned_ips = JSON.parse(data);
+            callback(banned_ips.list);
         })
     },
 
     getLockedUsers: function(callback) {
         client.get('locked_users',function(err,data){
-            callback(data);
+            locked_users = JSON.parse(data);
+            callback(locked_users.list);
         })
     }
 };
