@@ -57,7 +57,6 @@ var helpers = {
     isIPBanned: function(ip, callback) {
         client.get('banned_ips',function(err,locked_ips){
             locked_ips = JSON.parse(locked_ips);
-            console.log(locked_ips.list);
             var index = locked_ips.list.indexOf(ip);
             if(index !== -1){
                 callback(true);
@@ -100,7 +99,6 @@ var helpers = {
                     data = JSON.parse(data);
                     if(!err && helpers.calculatePasswordHash(password, data.salt) == data.password_hash){
                         cb(null,login);
-                        console.log("success");
                     }else if(!err){
                         cb('wrong_password', login);
                     }else{
@@ -113,7 +111,6 @@ var helpers = {
         ], function(errmsg, login) {
             client.get('id_'+login,function(err,data){
                 data = JSON.parse(data);
-                console.log(errmsg);
                 if(!errmsg){
                     data.count_failed = 0;
                     data.last_login_date = data.current_login_date;
@@ -138,7 +135,7 @@ var helpers = {
                             if(data.count_failed >= globalConfig.ipBanThreshold){
                                 client.delete('ip_'+ip);
                                 client.get('banned_ips',function(err,banned_ips){
-                                    banned_ips = JSON.parse(client.get('banned_ips'));
+                                    banned_ips = JSON.parse(banned_ips);
                                     banned_ips.list.push(ip);
                                     client.replace('banned_ips',JSON.stringify(banned_ips));
                                 });
@@ -150,6 +147,7 @@ var helpers = {
                     client.replace('id_'+login,JSON.stringify(data));
                 }
             });
+            console.log(errmsg);
             callback(errmsg, login);
         });
     },
@@ -226,7 +224,6 @@ app.get('/mypage', function(req, res) {
 
         client.get('id_'+req.session.login,function(err,data){
             data = JSON.parse(data);
-            console.log(data);
             var lastLogin = data.last_login_date;
             res.render('mypage', { 'last_login': lastLogin});
         })
