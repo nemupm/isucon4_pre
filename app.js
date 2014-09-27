@@ -1,4 +1,8 @@
 require('newrelic');
+require('memcache');
+
+var client = new memcache.Client(11211, 'localhost');
+client.connect();
 
 var _ = require('underscore');
 var async = require('async');
@@ -15,196 +19,129 @@ var strftime = require('strftime');
 var app = express();
 
 var globalConfig = {
-  userLockThreshold: process.env.ISU4_USER_LOCK_THRESHOLD || 3,
-  ipBanThreshold: process.env.ISU4_IP_BAN_THRESHOLD || 10
+    userLockThreshold: process.env.ISU4_USER_LOCK_THRESHOLD || 3,
+    ipBanThreshold: process.env.ISU4_IP_BAN_THRESHOLD || 10
 };
 
 var mysqlPool = mysql.createPool({
-  host: process.env.ISU4_DB_HOST || 'localhost',
-  user: process.env.ISU4_DB_USER || 'root',
-  password: process.env.ISU4_DB_PASSWORD || '',
-  database: process.env.ISU4_DB_NAME || 'isu4_qualifier'
+    host: process.env.ISU4_DB_HOST || 'localhost',
+    user: process.env.ISU4_DB_USER || 'root',
+    password: process.env.ISU4_DB_PASSWORD || '',
+    database: process.env.ISU4_DB_NAME || 'isu4_qualifier'
 });
 
+
 var helpers = {
-  calculatePasswordHash: function(password, salt) {
-    var c = crypto.createHash('sha256');
-    c.update(password + ':' + salt);
-    return c.digest('hex');
-  },
+    calculatePasswordHash: function(password, salt) {
+        var c = crypto.createHash('sha256');
+        c.update(password + ':' + salt);
+        return c.digest('hex');
+    },
 
-  isUserLocked: function(user, callback) {
-    if(!user) {
-      return callback(false);
-    };
-
-    mysqlPool.query(
-      'SELECT COUNT(1) AS failures FROM login_log WHERE ' +
-      'user_id = ? AND id > IFNULL((select id from login_log where ' +
-      'user_id = ? AND succeeded = 1 ORDER BY id DESC LIMIT 1), 0);',
-      [user.id, user.id],
-      function(err, rows) {
-        if(err) {
-          return callback(false);
-        }
-
-        callback(globalConfig.userLockThreshold <= rows[0].failures);
-      }
-    )
-  },
-
-  isIPBanned: function(ip, callback) {
-    mysqlPool.query(
-      'SELECT COUNT(1) AS failures FROM login_log WHERE ' +
-      'ip = ? AND id > IFNULL((select id from login_log where ip = ? AND ' +
-      'succeeded = 1 ORDER BY id DESC LIMIT 1), 0);',
-      [ip, ip],
-      function(err, rows) {
-        if(err) {
-          return callback(false);
-        }
-
-        callback(globalConfig.ipBanThreshold <= rows[0].failures);
-      }
-    )
-  },
-
-  attemptLogin: function(req, callback) {
-    var ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-    var login = req.body.login;
-    var password = req.body.password;
-
-    async.waterfall([
-      function(cb) {
-        mysqlPool.query('SELECT * FROM users WHERE login = ?', [login], function(err, rows) {
-          cb(null, rows[0]);
-        });
-      },
-      function(user, cb) {
-        helpers.isIPBanned(ip, function(banned) {
-          if(banned) {
-            cb('banned', user);
-          } else {
-            cb(null, user);
-          };
-        });
-      },
-      function(user, cb) {
-        helpers.isUserLocked(user, function(locked) {
-          if(locked) {
-            cb('locked', user);
-          } else {
-            cb(null, user);
-          };
-        });
-      },
-      function(user, cb) {
-        if(user && helpers.calculatePasswordHash(password, user.salt) == user.password_hash) {
-          cb(null, user);
-        } else if(user) {
-          cb('wrong_password', user);
-        } else {
-          cb('wrong_login', user);
+    isUserLocked: function(login, callback) {
+        if(!login) {
+            return callback(false);
         };
-      }
-    ], function(err, user) {
-      var succeeded = !err;
-      mysqlPool.query(
-        'INSERT INTO login_log' +
-        ' (`created_at`, `user_id`, `login`, `ip`, `succeeded`)' +
-        ' VALUES (?,?,?,?,?)',
-        [new Date(), (user || {})['id'], login, ip, succeeded],
-        function(e, rows) {
-          callback(err, user);
-        }
-      );
-    });
-  },
 
-  getCurrentUser: function(user_id, callback) {
-    mysqlPool.query('SELECT * FROM users WHERE id = ?', [user_id], function(err, rows) {
-      if(err) {
-        return callback(null);
-      }
+        client.gets('locked_users',function(err,locked_users){
+            var index = locked_users.indexOf(login);
+            if(index !== -1){
+                callback(true);
+            }else{
+                callback(false);
+            }
+        })
 
-      callback(rows[0]);
-    });
-  },
+    },
 
-  getBannedIPs: function(callback) {
-    mysqlPool.query(
-      'SELECT ip FROM (SELECT ip, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM '+
-      'login_log GROUP BY ip) AS t0 WHERE t0.max_succeeded = 0 AND t0.cnt >= ?',
-      [globalConfig.ipBanThreshold],
-      function(err, rows) {
-        var bannedIps = _.map(rows, function(row) { return row.ip; });
+    isIPBanned: function(ip, callback) {
+        client.gets('locked_ips',function(err,locked_ips){
+            var index = locked_ips.indexOf(ip);
+            if(index !== -1){
+                callback(true);
+            }else{
+                callback(false);
+            }
+        })
+        
+    },
 
-        mysqlPool.query(
-          'SELECT ip, MAX(id) AS last_login_id FROM login_log WHERE succeeded = 1 GROUP by ip',
-          function(err, rows) {
-            async.parallel(
-              _.map(rows, function(row) {
-                return function(cb) {
-                  mysqlPool.query(
-                    'SELECT COUNT(1) AS cnt FROM login_log WHERE ip = ? AND ? < id',
-                    [row.ip, row.last_login_id],
-                    function(err, rows) {
-                      if(globalConfig.ipBanThreshold <= (rows[0] || {})['cnt']) {
-                        bannedIps.push(row['ip']);
-                      }
-                      cb(null);
+    attemptLogin: function(req, callback) {
+        var ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+        var login = req.body.login;
+        var password = req.body.password;
+
+        async.waterfall([
+            function(cb) {
+                cb(null,login);
+            },
+            function(login, cb) {
+                helpers.isIPBanned(ip, function(banned) {
+                    if(banned) {
+                        cb('banned', login);
+                    } else {
+                        cb(null, login);
+                    };
+                });
+            },
+            function(login, cb) {
+                helpers.isUserLocked(login, function(locked) {
+                    if(locked) {
+                        cb('locked', login);
+                    } else {
+                        cb(null, login);
+                    };
+                });
+            },
+            function(login, cb) {
+                clinet.gets('login_'+login,function(err,data){
+                    if(!err && helpers.calculatePasswordHash(password, data.salt) == data.password_hash){
+                        cb(null,login);
+                    }else if(!err){
+                        cb('wrong_password', login);
+                    }else{
+                        cb('wrong_login', login);
                     }
-                  );
-                };
-              }),
-              function(err) {
-                callback(bannedIps);
-              }
-            );
-          }
-        );
-      }
-    )
-  },
+                    
+                });
+            }
+        ], function(err, login) {
+            var succeeded = !err;
 
-  getLockedUsers: function(callback) {
-    mysqlPool.query(
-      'SELECT user_id, login FROM ' +
-      '(SELECT user_id, login, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM ' +
-      'login_log GROUP BY user_id) AS t0 WHERE t0.user_id IS NOT NULL AND ' +
-      't0.max_succeeded = 0 AND t0.cnt >= ?',
-      [globalConfig.userLockThreshold],
-      function(err, rows) {
-        var lockedUsers = _.map(rows, function(row) { return row['login']; });
+            client.gets('login_'+login,function(err,data){
+                if(succeeded){
+                    data.count_failed = 0;
+                    data.last_login_date = data.current_login_date;
+                    data.current_login_date = new Data();
+                }else{
+                    data.count_failed += 1;
+                }
+                client.replace('login_'+login,data,function(err){
+                });
+            });
+        });
+    },
 
-        mysqlPool.query(
-          'SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE ' +
-          'user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id',
-          function(err, rows) {
-            async.parallel(
-              _.map(rows, function(row) {
-                return function(cb) {
-                  mysqlPool.query(
-                    'SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = ? AND ? < id',
-                    [row['user_id'], row['last_login_id']],
-                    function(err, rows) {
-                      if(globalConfig.userLockThreshold <= (rows[0] || {})['cnt']) {
-                        lockedUsers.push(row['login']);
-                      };
-                      cb(null);
-                    }
-                  );
-                };
-              }),
-              function(err) {
-                callback(lockedUsers);
-              }
-            );
-          }
-        );
-      }
-    )
-  }
+    getCurrentUser: function(login, callback) {
+        client.gets('login_'+login,function(err,data){
+            if(err){
+                return callback(null);
+            }
+            callback(data);
+        })
+    },
+
+    getBannedIPs: function(callback) {
+        client.gets('banned_ips',function(err,data){
+            callback(data);
+        })
+    },
+
+    getLockedUsers: function(callback) {
+        client.gets('banned_users',function(err,data){
+            callback(data);
+        })
+    }
 };
 
 app.use(logger('dev'));
@@ -216,78 +153,76 @@ app.use(session({ 'secret': 'isucon4-node-qualifier', resave: true, saveUninitia
 app.use(express.static(path.join(__dirname, '../public')));
 
 app.locals.strftime = function(format, date) {
-  return strftime(format, date);
+    return strftime(format, date);
 };
 
 app.get('/', function(req, res) {
-  var notice = req.session.notice;
-  req.session.notice = null;
+    var notice = req.session.notice;
+    req.session.notice = null;
 
-  res.render('index', { 'notice': notice });
+    res.render('index', { 'notice': notice });
 });
 
 app.post('/login', function(req, res) {
-  helpers.attemptLogin(req, function(err, user) {
-    if(err) {
-      switch(err) {
-        case 'locked':
-          req.session.notice = 'This account is locked.';
-          break;
-        case 'banned':
-          req.session.notice = "You're banned.";
-          break;
-        default:
-          req.session.notice = 'Wrong username or password';
-          break;
-      }
+    helpers.attemptLogin(req, function(err, login) {
+        if(err) {
+            switch(err) {
+            case 'locked':
+                req.session.notice = 'This account is locked.';
+                break;
+            case 'banned':
+                req.session.notice = "You're banned.";
+                break;
+            default:
+                req.session.notice = 'Wrong username or password';
+                break;
+            }
 
-      return res.redirect('/');
-    }
+            return res.redirect('/');
+        }
 
-    req.session.userId = user.id;
-    res.redirect('/mypage');
-  });
+        req.session.login = login;
+        res.redirect('/mypage');
+    });
 });
 
 app.get('/mypage', function(req, res) {
-  helpers.getCurrentUser(req.session.userId, function(user) {
-    if(!user) {
-      req.session.notice = "You must be logged in"
-      return res.redirect('/')
-    }
+    helpers.getCurrentUser(req.session.login, function(login) {
+        if(!login) {
+            req.session.notice = "You must be logged in"
+            return res.redirect('/')
+        }
 
-    mysqlPool.query(
-      'SELECT * FROM login_log WHERE succeeded = 1 AND user_id = ? ORDER BY id DESC LIMIT 2',
-      [user.id],
-      function(err, rows) {
-        var lastLogin = rows[rows.length-1];
-        res.render('mypage', { 'last_login': lastLogin });
-      }
-    );
-  });
+        client.gets('login'+req.session.login,function(err,data){
+            var lastLogin = data.last_login_date;
+            res.render('mypage', { 'last_login': lastLogin});
+        })
+    });
 });
 
 app.get('/report', function(req, res) {
-  async.parallel({
-    banned_ips: function(cb) {
-      helpers.getBannedIPs(function(ips) {
-        cb(null, ips);
-      });
-    },
-    locked_users: function(cb) {
-      helpers.getLockedUsers(function(users) {
-        cb(null, users);
-      });
-    }
-  }, function(err, result) {
-    res.json(result);
-  });
+    async.parallel({
+        banned_ips: function(cb) {
+            helpers.getBannedIPs(function(ips) {
+                cb(null, ips);
+            });
+        },
+        locked_users: function(cb) {
+            helpers.getLockedUsers(function(users) {
+                cb(null, users);
+            });
+        }
+    }, function(err, result) {
+        res.json(result);
+    });
 });
 
 app.use(function (err, req, res, next) {
-  res.status(500).send('Error: ' + err.message);
+    res.status(500).send('Error: ' + err.message);
 });
 
 var server = app.listen(process.env.PORT || 8080, function() {
-  console.log('Listening on port %d', server.address().port);
+    console.log('Listening on port %d', server.address().port);
 });
+
+
