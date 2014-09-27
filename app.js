@@ -1,5 +1,5 @@
 require('newrelic');
-require('memcache');
+var memcache = require('memcache');
 
 var client = new memcache.Client(11211, 'localhost');
 client.connect();
@@ -42,9 +42,9 @@ var helpers = {
         if(!login) {
             return callback(false);
         };
-
-        client.gets('locked_users',function(err,locked_users){
-            var index = locked_users.indexOf(login);
+        client.get('locked_users',function(err,locked_users){
+            locked_users = JSON.parse(locked_users);
+            var index = locked_users.list.indexOf(login);
             if(index !== -1){
                 callback(true);
             }else{
@@ -55,8 +55,10 @@ var helpers = {
     },
 
     isIPBanned: function(ip, callback) {
-        client.gets('locked_ips',function(err,locked_ips){
-            var index = locked_ips.indexOf(ip);
+        client.get('banned_ips',function(err,locked_ips){
+            locked_ips = JSON.parse(locked_ips);
+            console.log(locked_ips.list);
+            var index = locked_ips.list.indexOf(ip);
             if(index !== -1){
                 callback(true);
             }else{
@@ -94,9 +96,11 @@ var helpers = {
                 });
             },
             function(login, cb) {
-                clinet.gets('login_'+login,function(err,data){
+                client.get('id_'+login,function(err,data){
+                    data = JSON.parse(data);
                     if(!err && helpers.calculatePasswordHash(password, data.salt) == data.password_hash){
                         cb(null,login);
+                        console.log("success");
                     }else if(!err){
                         cb('wrong_password', login);
                     }else{
@@ -104,26 +108,54 @@ var helpers = {
                     }
                     
                 });
-            }
-        ], function(err, login) {
-            var succeeded = !err;
 
-            client.gets('login_'+login,function(err,data){
-                if(succeeded){
+            }
+        ], function(errmsg, login) {
+            client.get('id_'+login,function(err,data){
+                data = JSON.parse(data);
+                console.log(errmsg);
+                if(!errmsg){
                     data.count_failed = 0;
                     data.last_login_date = data.current_login_date;
-                    data.current_login_date = new Data();
-                }else{
+                    data.current_login_date = new Date();
+                }else if(errmsg != 'banned' && errmsg != 'locked'){
                     data.count_failed += 1;
+                    if(data.count_failed >= globalConfig.userLockThreshold){
+                        client.delete('id_'+login);
+                        client.get('locked_users',function(err,locked_users){
+                            locked_users = JSON.parse(locked_users);
+                            locked_users.list.push(login);
+                            client.replace('locked_users',JSON.stringify(locked_users));
+                        });
+                    }
+                    client.get('ip_'+ip,function(err,data){
+                        if(!data){
+                            data = {'count_failed':1}
+                            client.set('ip_'+ip,JSON.stringify(data));
+                        }else{
+                            data = JSON.parse(data);
+                            data.count_failed += 1;
+                            if(data.count_failed >= globalConfig.ipBanThreshold){
+                                client.delete('ip_'+ip);
+                                client.get('banned_ips',function(err,banned_ips){
+                                    banned_ips = JSON.parse(client.get('banned_ips'));
+                                    banned_ips.list.push(ip);
+                                    client.replace('banned_ips',JSON.stringify(banned_ips));
+                                });
+                            }else{
+                                client.replace('ip_'+ip,JSON.stringify(data));
+                            }
+                        }
+                    })
+                    client.replace('id_'+login,JSON.stringify(data));
                 }
-                client.replace('login_'+login,data,function(err){
-                });
             });
+            callback(errmsg, login);
         });
     },
 
     getCurrentUser: function(login, callback) {
-        client.gets('login_'+login,function(err,data){
+        client.get('id_'+login,function(err,data){
             if(err){
                 return callback(null);
             }
@@ -132,18 +164,17 @@ var helpers = {
     },
 
     getBannedIPs: function(callback) {
-        client.gets('banned_ips',function(err,data){
+        client.get('banned_ips',function(err,data){
             callback(data);
         })
     },
 
     getLockedUsers: function(callback) {
-        client.gets('banned_users',function(err,data){
+        client.get('locked_users',function(err,data){
             callback(data);
         })
     }
 };
-
 app.use(logger('dev'));
 app.enable('trust proxy');
 app.engine('ect', ect({ watch: true, root: __dirname + '/views', ext: '.ect' }).render);
@@ -193,7 +224,9 @@ app.get('/mypage', function(req, res) {
             return res.redirect('/')
         }
 
-        client.gets('login'+req.session.login,function(err,data){
+        client.get('id_'+req.session.login,function(err,data){
+            data = JSON.parse(data);
+            console.log(data);
             var lastLogin = data.last_login_date;
             res.render('mypage', { 'last_login': lastLogin});
         })
